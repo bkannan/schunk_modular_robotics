@@ -91,13 +91,17 @@ PowerCubeCtrl::PowerCubeCtrl(PowerCubeCtrlParams * params)
  * \brief Destructor
  */
 PowerCubeCtrl::~PowerCubeCtrl()
-{
-	  if (m_CANDeviceOpened)
-	  {
-		  pthread_mutex_lock(&m_mutex);
-		  PCube_closeDevice(m_DeviceHandle);
-		  pthread_mutex_unlock(&m_mutex);
-	  }
+{		
+	// stop all components
+	Stop(); 
+	
+	// close CAN device
+	if (m_CANDeviceOpened)
+	{
+	  pthread_mutex_lock(&m_mutex);
+	  PCube_closeDevice(m_DeviceHandle);
+	  pthread_mutex_unlock(&m_mutex);
+	}
 }
 
 /// ToDo: Check brief
@@ -113,6 +117,7 @@ bool PowerCubeCtrl::Init(PowerCubeCtrlParams * params)
 	std::string CanModule = m_params->GetCanModule();
 	std::string CanDevice = m_params->GetCanDevice();
 	std::vector<int> ModulIDs = m_params->GetModuleIDs();
+	std::vector<std::string> ModuleTypes = m_params->GetModuleTypes();
 	int CanBaudrate = m_params->GetBaudrate();
 	std::vector<double> MaxVel = m_params->GetMaxVel();
 	std::vector<double> MaxAcc = m_params->GetMaxAcc();
@@ -138,7 +143,13 @@ bool PowerCubeCtrl::Init(PowerCubeCtrlParams * params)
 	{
 		std::cout << ModulIDs[i] << " ";
 	}
+	std::cout << std::endl;
 
+	std::cout << "ModuleTypes: ";
+	for (int i = 0; i < DOF; i++)
+	{
+		std::cout << ModuleTypes.at(i) << " ";
+	}
 	std::cout << std::endl << "maxVel: ";
 	for (int i = 0; i < DOF; i++)
 	{
@@ -185,6 +196,7 @@ bool PowerCubeCtrl::Init(PowerCubeCtrlParams * params)
 		m_ErrorMessage = errorMsg.str();
 		return false;
 	}
+
 	m_CANDeviceOpened = true;
 
 	/// reset all modules
@@ -220,21 +232,27 @@ bool PowerCubeCtrl::Init(PowerCubeCtrlParams * params)
 		{
 			std::ostringstream errorMsg;
 			errorMsg << "Could not find Module with ID " << ModulIDs[i] << ", m5api error code: " << ret;
-			m_ErrorMessage = errorMsg.str();
-			return false;
+			m_ErrorMessage = errorMsg.str();	
+			//return false;
 		}
-
 		/// otherwise success
-		std::cout << "Found module " << ModulIDs[i] << std::endl;
+		std::cout << "Found module " << ModulIDs[i] << " Serial: " << serNo << std::endl;
 	}
 
 	// modules should be initialized now
 	m_pc_status = PC_CTRL_OK;
+	m_Initialized = true; 
 
 	// check if modules are in normal state
 	std::vector<std::string> errorMessages;
 	PC_CTRL_STATUS status;
+
+ 	// update status variables
+	updateStates();
+
+	// grep updated status 
 	getStatus(status, errorMessages);
+	
 	if ((status != PC_CTRL_OK) && (status != PC_CTRL_NOT_HOMED))
 	{
 		m_ErrorMessage.assign("");
@@ -289,7 +307,6 @@ bool PowerCubeCtrl::Init(PowerCubeCtrlParams * params)
 
 	// All modules initialized successfully
 	m_pc_status = PC_CTRL_OK;
-	m_Initialized = true;
 
 	return true;
 }
@@ -503,13 +520,15 @@ bool PowerCubeCtrl::MoveVel(const std::vector<double>& velocities)
 		//int ret = PCube_moveVelExtended(m_DeviceHandle, m_params->GetModuleID(i), velocities[i], &m_status[i], &m_dios[i], &pos);
 		int ret = PCube_moveStepExtended(m_DeviceHandle, m_params->GetModuleID(i), m_positions[i] + cmd_pos, (cmd_time+m_horizon), &m_status[i], &m_dios[i], &pos);
 		pthread_mutex_unlock(&m_mutex);
-		
+
 		if (ret != 0)
 		{
-		  pos = m_positions[i];
-		  std::cout << ret << std::endl;
-		//	m_pc_status = PC_CTRL_ERR;
-		}
+			ROS_INFO("Com Error"); 		  
+			pos = m_positions[i];
+		  //std::cout << "MoveVelExt retuned: " << ret << std::endl;
+		  //	m_pc_status = PC_CTRL_ERR;
+		}else
+		{ROS_INFO("worked");}
 		
 		// !!! Position in pos is position before moveStep movement, to get the expected position after the movement (required as input to the next moveStep command) we add the delta position (cmd_pos) !!!
 		m_positions[i] = (double)pos + cmd_pos;
@@ -788,9 +807,9 @@ bool PowerCubeCtrl::updateStates()
 
 	unsigned int DOF = m_params->GetDOF();
 
-	unsigned long state;
+	unsigned long state = PC_CTRL_ERR;
 	
-	unsigned long state_s; // for debug
+	unsigned long state_s = PC_CTRL_ERR; // for debug
 
 	unsigned char dio;
 	float position;
@@ -805,23 +824,23 @@ bool PowerCubeCtrl::updateStates()
 		if (ret != 0)
 		{
 			//m_pc_status = PC_CTRL_ERR;
-			std::cout << "State: Error com" << std::endl; 			
+			//std::cout << "State: Error com with Module: " << i << " Time: " << ros::Time::now() << std::endl; 			
 		}
 		else
-		{	if( state_s != state)
+		{	
+			if( state_s != state)
 			{
-				std::cout << "State: " << state << "Joint: " << i << std::endl; 
+				std::cout << "State: " << state << " Joint: " << i << std::endl; 
 			}
 		 	m_status[i] = state;
 			m_dios[i] = dio;
 			m_positions[i] = position;
 		}	
 		
-    /// ToDo: calculate vel and acc
+    /// TODO: calculate vel and acc
     ///m_velocities = ???;
     ///m_accelerations = ???
 	}
-	
 	return true;
 }
 
@@ -832,7 +851,8 @@ bool PowerCubeCtrl::getStatus(PC_CTRL_STATUS& status, std::vector<std::string>& 
 {
 	unsigned int DOF = m_params->GetDOF();
 	std::vector<int> ModuleIDs = m_params->GetModuleIDs();
-
+	std::vector<std::string> ModuleTypes = m_params->GetModuleTypes();
+	
 	errorMessages.clear();
 	errorMessages.resize(DOF);
 
@@ -849,13 +869,15 @@ bool PowerCubeCtrl::getStatus(PC_CTRL_STATUS& status, std::vector<std::string>& 
 			errorMessages[i] = errorMsg.str();
 			status = PC_CTRL_POW_VOLT_ERR;
 		}
-		/*    else if (!(m_status[i] & STATEID_MOD_HOME))
+		// check if module is homed (necessary for Schunk PW-Modules, but not possible with PRL-Modules)
+		// TODO: Can this be used to avoid referece problems with PRL-Modules? (TIF)
+		else if ((!(ModuleTypes.at(i) == "PRL")) && ((m_status[i] & STATEID_MOD_HOME) == 0))
 		{
 		  errorMsg << "Warning: Module " << ModuleIDs[i];
 		  errorMsg << " is not referenced!";
 		  errorMessages[i] = errorMsg.str();
 		  status = PC_CTRL_NOT_HOMED;
-		}*/
+		}
 
 		else if (m_status[i] & STATEID_MOD_ERROR)
 		{
@@ -932,65 +954,95 @@ bool PowerCubeCtrl::doHoming()
 {
 	unsigned int DOF = m_params->GetDOF();
 	std::vector<int> ModuleIDs = m_params->GetModuleIDs();
-
+	std::vector<std::string> ModuleTypes = m_params->GetModuleTypes();
+	
+	/// wait until all modules are homed
+	double max_homing_time = 15.0; // seconds   
+	double homing_time = 999.0;	// set to 0 if any module is homed
+	double intervall = 0.1;
+	
 	/// start homing
 	int ret = 0;
 	for (unsigned int i = 0; i < DOF; i++)
-	{
-		pthread_mutex_lock(&m_mutex);
-		ret = PCube_homeModule(m_DeviceHandle, ModuleIDs[i]);
-		pthread_mutex_unlock(&m_mutex);
-		if (ret != 0)
-		{
-			std::ostringstream errorMsg;
-			errorMsg << "Can't start homing for module " << ModuleIDs[i] << ", m5api error code: " << ret;
-			m_ErrorMessage = errorMsg.str();
-			return false;
-		}
-	}
+	{	
+		// check if homing for module is permitted (PRL-Modules need not to be homed by ROS)
+		if ( (ModuleTypes.at(i) == "PW") || (ModuleTypes.at(i) == "other") )
+		{	// homing timer
+			homing_time = 0.0;
 
-	/// wait until all modules are homed
-	double max_homing_time = 10.0; // seconds
-	double homing_time = 0.0;
-	double intervall = 0.1;
-
-	for (unsigned int i = 0; i < DOF; i++)
-	{
-		unsigned long int help;
-		do
-		{
 			pthread_mutex_lock(&m_mutex);
-			PCube_getModuleState(m_DeviceHandle, ModuleIDs[i], &help);
+			ret = PCube_homeModule(m_DeviceHandle, ModuleIDs[i]);
 			pthread_mutex_unlock(&m_mutex);
 
-			/// convert sec to usec
-			usleep(intervall * 1000000);
-		} while ((help & STATEID_MOD_HOME) == 0);
-		m_status[i] = help;
+			std::cout << " homing started at " << ros::Time::now() << std::endl; 
+
+			if (ret != 0)
+			{	// TODO: sure that ret must be 0 ???  
+				std::cout << "Error while sending homing command to Module: " << i << "I try to reset the module." << std::endl; 
+
+				// reset module with the hope that homing works afterwards
+				pthread_mutex_lock(&m_mutex);
+				ret = PCube_resetModule(m_DeviceHandle, ModuleIDs[i]);
+				pthread_mutex_unlock(&m_mutex);
+				if (ret != 0)
+				{	
+					std::ostringstream errorMsg;
+					errorMsg << "Can't reset module after homing error" << ModuleIDs[i] << ", m5api error code: " << ret;
+					m_ErrorMessage = errorMsg.str();
+				}
+
+				// little break for reboot
+				usleep(200000); 
+
+				pthread_mutex_lock(&m_mutex);
+				ret = PCube_homeModule(m_DeviceHandle, ModuleIDs[i]);
+				pthread_mutex_unlock(&m_mutex);
+				if (ret != 0)
+				{	
+					std::ostringstream errorMsg;
+					errorMsg << "Can't start homing for module " << ModuleIDs[i] << ", tried reset with no success, m5api error code: " << ret;
+					m_ErrorMessage = errorMsg.str();
+					std::cout << "Error on sending homing command to module " << ModuleIDs.at(i) << "!" << std::endl;		
+					return false;				
+				}
+			}	
+		}
 	}
 
 	for (unsigned int i = 0; i < DOF; i++)
-	{
-		homing_time = 0.0;
-		/*while ((homing_time < max_homing_time))
-		 {
-			 updateStates();
-			 if ((m_status[i] & STATEID_MOD_HOME))
-			 {
-				 std::cout << "Module " << ModuleIDs[i] << " homed in " << homing_time << "sec." << std::endl;
-			 }
+	{	
+		
+		// check if homing for module is permitted (PRL-Modules need not to be homed by ROS)
+		//if ( (ModuleTypes.at(i) == "PW") || (ModuleTypes.at(i) == "other") )
+		//{
+			unsigned long int help;
+			do
+			{
+				pthread_mutex_lock(&m_mutex);
+				PCube_getModuleState(m_DeviceHandle, ModuleIDs[i], &help);
+				pthread_mutex_unlock(&m_mutex);
+				std::cout << "homing active Module:" << ModuleIDs.at(i) << ": " << help << std::endl;
+				/// convert sec to usec
+				usleep(intervall * 1000000);
+				homing_time += intervall; 
+				if (homing_time >= max_homing_time) {Stop(); break;} 
+			} while ((help & STATEID_MOD_HOME) == 0);
+			m_status[i] = help;
+			std::cout << "State of Module " << ModuleIDs.at(i) << ": " << help << std::endl;
+		//} 
+	}
 
-			 usleep(intervall * 1000000); // convert sec to usec
-			 homing_time = homing_time + intervall;
-		 }
-		 */
-		/// check result
-		if (!(m_status[i] & STATEID_MOD_HOME))
-		{
-			std::cout << "Homing failed: Error in  Module " << ModuleIDs[i] << std::endl;
-			m_pc_status = PC_CTRL_NOT_HOMED;
-			return false;
-		}
+	for (unsigned int i = 0; i < DOF; i++)
+	{	
+			/// check result
+			if (!(m_status[i] & STATEID_MOD_HOME) || (m_status[i] & STATEID_MOD_ERROR) )
+			{
+				std::cout << "Homing failed: Error in  Module " << ModuleIDs[i] << std::endl;
+				m_pc_status = PC_CTRL_NOT_HOMED;
+				return false;
+			}
+		
+		std::cout << "Homing for Modul " << ModuleIDs.at(i) << " done." << std::endl; 
 	}
 
 	// modules successfully homed
